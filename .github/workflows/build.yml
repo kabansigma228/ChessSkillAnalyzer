@@ -34,6 +34,11 @@ jobs:
       - name: Extract project
         run: |
           unzip ChessSkillAnalyzer_Android_Kotlin.zip -d appsrc
+          printf '%s\n' \
+            'org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8' \
+            'android.useAndroidX=true' \
+            'kotlin.code.style=official' \
+            > appsrc/gradle.properties
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
