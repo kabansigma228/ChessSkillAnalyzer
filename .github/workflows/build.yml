@@ -1,4 +1,3 @@
-
 name: Build Chess Skill Analyzer APK
 
 on:
@@ -49,70 +48,65 @@ jobs:
           p = Path("appsrc/app/build.gradle.kts")
           s = p.read_text()
 
-          def replace_block(text, pattern, replacement):
-              match = re.search(pattern, text)
-              if not match:
-                  return text, False
-              start = match.start()
-              opening = text.find("{", match.start())
-              depth = 0
-              for i in range(opening, len(text)):
-                  if text[i] == "{":
-                      depth += 1
-                  elif text[i] == "}":
-                      depth -= 1
-                      if depth == 0:
-                          return text[:start] + replacement + text[i+1:], True
-              raise RuntimeError("Could not parse Gradle block")
-
-          android_match = re.search(r'\bandroid\s*\{', s)
-          if not android_match:
+          m = re.search(r'\bandroid\s*\{', s)
+          if not m:
               raise RuntimeError("android block not found")
 
-          android_start = android_match.start()
-          android_open = s.find("{", android_start)
+          start = m.start()
+          opening = s.find("{", start)
           depth = 0
-          android_end = None
-          for i in range(android_open, len(s)):
+          end = None
+
+          for i in range(opening, len(s)):
               if s[i] == "{":
                   depth += 1
               elif s[i] == "}":
                   depth -= 1
                   if depth == 0:
-                      android_end = i
+                      end = i
                       break
 
-          if android_end is None:
+          if end is None:
               raise RuntimeError("android block is incomplete")
 
-          block = s[android_start:android_end+1]
-          compile_block = """compileOptions {
+          block = s[start:end + 1]
+
+          for name in ("compileOptions", "kotlinOptions"):
+              while True:
+                  m = re.search(r'\b' + name + r'\s*\{', block)
+                  if not m:
+                      break
+                  brace = block.find("{", m.start())
+                  d = 0
+                  finish = None
+                  for i in range(brace, len(block)):
+                      if block[i] == "{":
+                          d += 1
+                      elif block[i] == "}":
+                          d -= 1
+                          if d == 0:
+                              finish = i
+                              break
+                  if finish is None:
+                      raise RuntimeError(name + " block is incomplete")
+                  block = block[:m.start()] + block[finish + 1:]
+
+          settings = """
+              compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
                   targetCompatibility = JavaVersion.VERSION_17
-              }"""
+              }
 
-          if re.search(r'\bcompileOptions\s*\{', block):
-              block, _ = replace_block(
-                  block, r'\bcompileOptions\s*\{', compile_block
-              )
-          else:
-              block = block[:-1] + "\n    " + compile_block + "\n}"
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          """
 
-          s = s[:android_start] + block + s[android_end+1:]
-
-          kotlin_block = """kotlinOptions {
-              jvmTarget = "17"
-          }"""
-
-          if re.search(r'\bkotlinOptions\s*\{', s):
-              s, _ = replace_block(
-                  s, r'\bkotlinOptions\s*\{', kotlin_block
-              )
-          else:
-              s += "\n\n" + kotlin_block + "\n"
-
+          block = block[:-1] + settings + "\n}"
+          s = s[:start] + block + s[end + 1:]
           p.write_text(s)
-          print("Java and Kotlin targets set to 17")
+
+          print("Java and Kotlin targets set to 17 inside android block")
           PY
 
       - name: Set up Gradle
