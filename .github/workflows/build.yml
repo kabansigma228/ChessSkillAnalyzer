@@ -1,3 +1,4 @@
+
 name: Build Chess Skill Analyzer APK
 
 on:
@@ -12,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout app
         uses: actions/checkout@v4
 
       - name: Set up Java
@@ -26,11 +27,27 @@ jobs:
         with:
           packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
 
-      - name: Install Android platform
+      - name: Install Android SDK and NDK
         run: |
-          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+          sdkmanager "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "ndk;27.2.12479018"
 
-      - name: Extract project
+      - name: Add NDK compiler to PATH
+        run: |
+          echo "$ANDROID_HOME/ndk/27.2.12479018/toolchains/llvm/prebuilt/linux-x86_64/bin" >> "$GITHUB_PATH"
+
+      - name: Download Stockfish source
+        run: |
+          git clone --depth 1 https://github.com/official-stockfish/Stockfish.git stockfish-src
+
+      - name: Build Stockfish for Android ARM64
+        run: |
+          make -C stockfish-src/src net
+          make -C stockfish-src/src -j2 build ARCH=armv8 COMP=ndk
+          test -x stockfish-src/src/stockfish
+
+      - name: Extract Android project
         run: |
           unzip ChessSkillAnalyzer_Android_Kotlin.zip -d appsrc
           printf '%s\n' \
@@ -38,6 +55,139 @@ jobs:
             'android.useAndroidX=true' \
             'kotlin.code.style=official' \
             > appsrc/gradle.properties
+
+      - name: Package Stockfish binary
+        run: |
+          mkdir -p appsrc/app/src/main/jniLibs/arm64-v8a
+          cp stockfish-src/src/stockfish \
+            appsrc/app/src/main/jniLibs/arm64-v8a/libstockfish.so
+          chmod 755 appsrc/app/src/main/jniLibs/arm64-v8a/libstockfish.so
+
+      - name: Patch Stockfish launcher
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          files = list(Path("appsrc/app/src/main").rglob("MainActivity.kt"))
+          if len(files) != 1:
+              raise RuntimeError(f"Expected one MainActivity.kt, found {len(files)}")
+
+          p = files[0]
+          s = p.read_text()
+
+          pattern = r'class StockfishEngine\(private val context: android\.content\.Context\)\s*\{.*?\n\}\s*(?=object ChessPosition)'
+
+          replacement = r'''class StockfishEngine(private val context: android.content.Context) {
+              fun analyze(fen: String, depth: Int): EngineResult = try {
+                  val abi = android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "unknown"
+                  if (abi != "arm64-v8a") error("Неподдерживаемая архитектура: $abi")
+
+                  val target = java.io.File(
+                      context.applicationInfo.nativeLibraryDir,
+                      "libstockfish.so"
+                  )
+                  if (!target.isFile) error("Файл Stockfish не найден: ${target.absolutePath}")
+
+                  val process = ProcessBuilder(target.absolutePath)
+                      .directory(context.filesDir)
+                      .redirectErrorStream(true)
+                      .start()
+
+                  val writer = process.outputStream.bufferedWriter()
+                  val reader = process.inputStream.bufferedReader()
+
+                  fun send(command: String) {
+                      writer.write(command)
+                      writer.newLine()
+                      writer.flush()
+                  }
+
+                  send("uci")
+                  var line: String?
+                  var ready = false
+
+                  while (true) {
+                      line = reader.readLine() ?: break
+                      if (line == "uciok") {
+                          ready = true
+                          break
+                      }
+                  }
+                  if (!ready) error("Stockfish не ответил на UCI")
+
+                  send("isready")
+                  while (true) {
+                      line = reader.readLine() ?: error("Stockfish не ответил на isready")
+                      if (line.trim() == "readyok") break
+                  }
+
+                  send("position fen $fen")
+                  send("go depth $depth")
+
+                  var best = "—"
+                  var score = "—"
+                  var variation = ""
+
+                  while (true) {
+                      line = reader.readLine() ?: break
+
+                      if (line.startsWith("info ") && line.contains(" score ")) {
+                          val tokens = line.split(" ")
+                          val si = tokens.indexOf("score")
+
+                          if (si >= 0 && si + 2 < tokens.size) {
+                              score = when (tokens[si + 1]) {
+                                  "cp" -> String.format(
+                                      java.util.Locale.US,
+                                      "%+.2f пешки",
+                                      tokens[si + 2].toInt() / 100.0
+                                  )
+                                  "mate" -> "мат в ${tokens[si + 2]}"
+                                  else -> score
+                              }
+                          }
+
+                          val pi = tokens.indexOf("pv")
+                          if (pi >= 0) {
+                              variation = tokens.drop(pi + 1).take(12).joinToString(" ")
+                          }
+                      }
+
+                      if (line.startsWith("bestmove ")) {
+                          best = line.split(" ").getOrNull(1) ?: "—"
+                          break
+                      }
+                  }
+
+                  send("quit")
+                  writer.close()
+                  process.waitFor()
+
+                  EngineResult(
+                      best,
+                      score,
+                      variation,
+                      "Анализ завершён на глубине $depth."
+                  )
+              } catch (e: Exception) {
+                  EngineResult(
+                      "—",
+                      "—",
+                      "",
+                      "Stockfish не найден или не запустился: ${e.message}"
+                  )
+              }
+          }
+          '''
+
+          updated, count = re.subn(pattern, lambda _: replacement + "\n\n", s, count=1, flags=re.S)
+          if count != 1:
+              raise RuntimeError("Could not find StockfishEngine block in MainActivity.kt")
+
+          p.write_text(updated)
+          print("Stockfish launcher updated")
+          PY
 
       - name: Fix Java and Kotlin targets
         run: |
@@ -105,8 +255,6 @@ jobs:
           block = block[:-1] + settings + "\n}"
           s = s[:start] + block + s[end + 1:]
           p.write_text(s)
-
-          print("Java and Kotlin targets set to 17 inside android block")
           PY
 
       - name: Set up Gradle
