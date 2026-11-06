@@ -40,6 +40,81 @@ jobs:
             'kotlin.code.style=official' \
             > appsrc/gradle.properties
 
+      - name: Fix Java and Kotlin targets
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("appsrc/app/build.gradle.kts")
+          s = p.read_text()
+
+          def replace_block(text, pattern, replacement):
+              match = re.search(pattern, text)
+              if not match:
+                  return text, False
+              start = match.start()
+              opening = text.find("{", match.start())
+              depth = 0
+              for i in range(opening, len(text)):
+                  if text[i] == "{":
+                      depth += 1
+                  elif text[i] == "}":
+                      depth -= 1
+                      if depth == 0:
+                          return text[:start] + replacement + text[i+1:], True
+              raise RuntimeError("Could not parse Gradle block")
+
+          android_match = re.search(r'\bandroid\s*\{', s)
+          if not android_match:
+              raise RuntimeError("android block not found")
+
+          android_start = android_match.start()
+          android_open = s.find("{", android_start)
+          depth = 0
+          android_end = None
+          for i in range(android_open, len(s)):
+              if s[i] == "{":
+                  depth += 1
+              elif s[i] == "}":
+                  depth -= 1
+                  if depth == 0:
+                      android_end = i
+                      break
+
+          if android_end is None:
+              raise RuntimeError("android block is incomplete")
+
+          block = s[android_start:android_end+1]
+          compile_block = """compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }"""
+
+          if re.search(r'\bcompileOptions\s*\{', block):
+              block, _ = replace_block(
+                  block, r'\bcompileOptions\s*\{', compile_block
+              )
+          else:
+              block = block[:-1] + "\n    " + compile_block + "\n}"
+
+          s = s[:android_start] + block + s[android_end+1:]
+
+          kotlin_block = """kotlinOptions {
+              jvmTarget = "17"
+          }"""
+
+          if re.search(r'\bkotlinOptions\s*\{', s):
+              s, _ = replace_block(
+                  s, r'\bkotlinOptions\s*\{', kotlin_block
+              )
+          else:
+              s += "\n\n" + kotlin_block + "\n"
+
+          p.write_text(s)
+          print("Java and Kotlin targets set to 17")
+          PY
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
